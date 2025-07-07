@@ -9,7 +9,7 @@ from datetime import datetime
 import time
 
 # Page setup
-st.set_page_config(page_title="🪄 QueryGenie Chat (Dark Mode)", layout="wide")
+st.set_page_config(page_title="🪄 QueryGenie", layout="wide")
 
 # Custom CSS for modern dark theme & chat bubbles
 custom_css = """
