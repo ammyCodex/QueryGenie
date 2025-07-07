@@ -44,7 +44,7 @@ Limitations
 
 License & Copyright
 
-© 2025 Ammy Sharma
+© 2025 Ammy
 
 This project is provided as-is for personal and educational use.
 Do not redistribute or use commercially without permission.
