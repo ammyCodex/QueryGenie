@@ -21,7 +21,7 @@
 1. Clone this repository.
 2. Install dependencies:
    ```bash
-   pip install streamlit cohere pandas sqlite3 sqlparse
+   pip install streamlit cohere pandas sqlparse
    ```
 3. Set your Cohere API key in secrets.toml or via Streamlit secrets manager:
 [default]
