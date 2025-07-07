@@ -19,7 +19,7 @@
 ## Demo
 
 Try it live at:  
-``` https://ammy-querygenie.streamlit.app/ ```
+https://ammy-querygenie.streamlit.app/ 
 
 ---
 
