@@ -135,6 +135,10 @@ if "action_taken" not in st.session_state:
     st.session_state.action_taken = None
 if "needs_execute" not in st.session_state:
     st.session_state.needs_execute = False
+if "last_schema_str" not in st.session_state:
+    st.session_state.last_schema_str = ""
+if "last_user_query" not in st.session_state:
+    st.session_state.last_user_query = ""
 
 # Sidebar for DB upload
 with st.sidebar:
@@ -339,6 +343,68 @@ with col_main:
     
     query = st.text_area("Ask your database...", height=100, key="chat_input", placeholder="e.g., Show all users from 2024")
 
+    # Run execution every run when user clicked Execute (must be outside Send block)
+    # Uses same LLM-generated query from session state (pending_sql) to fetch from DB
+    if st.session_state.get("needs_execute"):
+        st.session_state.needs_execute = False
+        sql_to_run = st.session_state.pending_sql  # same query LLM generated, saved earlier
+        if not sql_to_run or sql_to_run == "NO_VALID_SQL":
+            st.session_state.approval_mode = False
+            st.session_state.chat_history.append({"role": "assistant", "content": "❌ Could not generate a valid SQL query.", "timestamp": datetime.now(), "type": "result"})
+            audit_logger.log_query("REJECTED", str(sql_to_run or ""), "Generator returned NO_VALID_SQL")
+        elif st.session_state.conn:
+            try:
+                df = pd.read_sql_query(sql_to_run, st.session_state.conn)
+                truncated = len(df) > 20
+                display_df = df.head(20) if truncated else df
+                st.session_state.last_query_df = display_df.copy()
+                st.session_state.last_query_truncated = truncated
+                st.session_state.last_sql_query = sql_to_run
+                st.session_state.approval_mode = False
+                row_count_msg = f"{len(df)}" if not truncated else f"{len(df)} (showing first 20)"
+                audit_logger.log_approval(sql_to_run, approved=True)
+                audit_logger.log_query("EXECUTED", sql_to_run, f"Success: {row_count_msg} rows")
+                st.session_state.chat_history.append({"role": "assistant", "content": f"✅ Success! Returned {row_count_msg} rows.", "timestamp": datetime.now(), "type": "result"})
+            except Exception as e:
+                st.session_state.approval_mode = False
+                st.session_state.chat_history.append({"role": "assistant", "content": f"❌ Query Error: {str(e)}", "timestamp": datetime.now(), "type": "result"})
+                audit_logger.log_query("ERROR", sql_to_run, str(e))
+        # No rerun—script continues and table is shown below in same run
+
+    # Show Review SQL and Execute/Improve when in approval mode (runs every run so Execute click is handled)
+    if st.session_state.approval_mode and st.session_state.pending_sql:
+        st.markdown("### 📝 Review Generated SQL")
+        st.code(st.session_state.pending_sql, language="sql")
+        cols_action = st.columns(2, gap="medium")
+        if cols_action[0].button("✅ Execute", use_container_width=True, key="btn_execute"):
+            st.session_state.needs_execute = True
+            st.rerun()
+        if cols_action[1].button("🔄 Improve", use_container_width=True, key="btn_improve"):
+            if st.session_state.improve_rounds >= 3:
+                st.error("❌ Max improve attempts (3) reached.")
+                audit_logger.log_query("REJECTED", st.session_state.pending_sql, "Max improve attempts exceeded")
+            else:
+                schema_str = st.session_state.get("last_schema_str") or select_relevant_schema(st.session_state.schema_dict, st.session_state.get("last_user_query", query), max_tables=6)
+                improve_prompt = f"""Improve the SQLite query to better match the user's request:
+{st.session_state.get("last_user_query", query)}
+
+Current SQL:
+{st.session_state.pending_sql}
+
+Return ONLY the improved SQL query, nothing else:"""
+                with st.spinner("✨ AI is improving your query..."):
+                    try:
+                        new_sql = generate_sql({"schema": schema_str, "request": improve_prompt})
+                    except Exception:
+                        new_sql = generate_sql(improve_prompt)
+                    if not validate_sql_against_schema(new_sql, st.session_state.schema_dict):
+                        new_sql = "NO_VALID_SQL"
+                st.session_state.pending_sql = new_sql
+                st.session_state.improve_rounds += 1
+                st.session_state.chat_history.append({"role": "assistant", "content": f"Improved SQL (v{st.session_state.improve_rounds}):\n{new_sql}", "timestamp": datetime.now(), "type": "assistant"})
+                audit_logger.log_query("PENDING", new_sql, f"Improved (round {st.session_state.improve_rounds})")
+                st.rerun()
+
     if st.button("🚀 Send", use_container_width=True):
         if not query.strip():
             st.error("Please enter your query.")
@@ -430,125 +496,14 @@ Only SQL, no explanation:"""
 
             st.session_state.pending_sql = sql
             st.session_state.improve_rounds = 0
+            st.session_state.last_schema_str = schema_str
+            st.session_state.last_user_query = query
             st.session_state.chat_history.append({"role": "assistant", "content": sql, "timestamp": datetime.now(), "type": "assistant"})
 
             st.session_state.last_query_df = None
             st.session_state.last_sql_query = sql
-
-            # Human-in-loop controls
             st.session_state.approval_mode = True
-            st.markdown("### 📝 Review Generated SQL")
-            st.code(st.session_state.pending_sql, language="sql")
-            # Debug: show what was passed and generated
-            with st.expander("🔍 Debug: Schema, Query, and Generated SQL"):
-                st.markdown("**User Request:**")
-                st.text(query)
-                st.markdown("**Schema passed to generator:**")
-                st.text(schema_str)
-                st.markdown("**Generated SQL:**")
-                st.code(st.session_state.pending_sql if st.session_state.pending_sql != "NO_VALID_SQL" else "[Could not generate valid SQL]", language="sql")
-            
-            cols_action = st.columns(2, gap="medium")
-
-            if cols_action[0].button("✅ Execute", use_container_width=True, key=f"exec_{datetime.now().timestamp()}"):
-                print(f"\n[EXECUTE BUTTON CLICKED]")
-                st.session_state.needs_execute = True
-            
-            if cols_action[1].button("🔄 Improve", use_container_width=True, key=f"impr_{datetime.now().timestamp()}"):
-                print(f"\n[IMPROVE BUTTON CLICKED]")
-                if st.session_state.improve_rounds >= 3:
-                    print(f"[ERROR] Max improve attempts (3) reached")
-                    st.error("❌ Max improve attempts (3) reached.")
-                    audit_logger.log_query("REJECTED", sql, "Max improve attempts exceeded")
-                else:
-                    print(f"[IMPROVING] Attempt {st.session_state.improve_rounds + 1}/3")
-                    st.info(f"🔁 Improving query (attempt {st.session_state.improve_rounds + 1}/3)...")
-                    improve_prompt = f"""Improve the SQLite query to better match the user's request:
-{query}
-
-Current SQL:
-{st.session_state.pending_sql}
-
-Return ONLY the improved SQL query, nothing else:"""
-                    with st.spinner("✨ AI is improving your query..."):
-                        try:
-                            new_sql = generate_sql({"schema": schema_str, "request": improve_prompt})
-                        except Exception:
-                            print(f"[FALLBACK] LangChain failed, using direct Cohere")
-                            new_sql = generate_sql(improve_prompt)
-
-                    # Validate improved SQL; retry if needed
-                    try:
-                        if not validate_sql_against_schema(new_sql, st.session_state.schema_dict):
-                            print(f"[RETRY] Improved SQL validation failed. Retrying...")
-                            simple_prompt = f"Improve and generate SQLite SQL for: {query}\n\nTables:\n{schema_str}\n\nRespond with ONLY SQL:"
-                            try:
-                                new_sql = generate_sql(simple_prompt)
-                                if not validate_sql_against_schema(new_sql, st.session_state.schema_dict):
-                                    new_sql = "NO_VALID_SQL"
-                                    print(f"[ERROR] Improved SQL still invalid")
-                                else:
-                                    print(f"[SUCCESS] Improved SQL valid: {new_sql[:100]}...")
-                            except Exception as e:
-                                new_sql = "NO_VALID_SQL"
-                                print(f"[ERROR] Improve retry failed: {e}")
-                    except Exception as e:
-                        new_sql = "NO_VALID_SQL"
-                        print(f"[ERROR] Improve validation error: {e}")
-                    
-                    st.session_state.pending_sql = new_sql
-                    st.session_state.improve_rounds += 1
-                    st.session_state.chat_history.append({"role": "assistant", "content": f"Improved SQL (v{st.session_state.improve_rounds}):\n{new_sql}", "timestamp": datetime.now(), "type": "assistant"})
-                    audit_logger.log_query("PENDING", new_sql, f"Improved (round {st.session_state.improve_rounds})")
-                    st.rerun()
-            
-            # Execute if needs_execute flag is set (outside button block for cleaner flow)
-            if st.session_state.get("needs_execute"):
-                print(f"\n[EXECUTE ACTION] Processing execution")
-                st.session_state.needs_execute = False
-                sql_to_run = st.session_state.pending_sql
-                if sql_to_run == "NO_VALID_SQL":
-                    print(f"[ERROR] Invalid SQL, cannot execute")
-                    st.error("Could not generate a valid SQL query from the provided schema and request.")
-                    audit_logger.log_query("REJECTED", sql_to_run, "Generator returned NO_VALID_SQL")
-                else:
-                    print(f"[EXECUTING SQL] {sql_to_run}")
-                    audit_logger.log_approval(sql_to_run, approved=True)
-                    with st.spinner("⏳ Executing query..."):
-                        try:
-                            try:
-                                limited_sql = f"SELECT * FROM ({sql_to_run}) LIMIT 21"
-                                print(f"[SQL WITH LIMIT] {limited_sql}")
-                                df = pd.read_sql_query(limited_sql, st.session_state.conn)
-                            except Exception as e:
-                                print(f"[FALLBACK] Limit query failed: {e}. Running original query.")
-                                df = pd.read_sql_query(sql_to_run, st.session_state.conn)
-
-                            truncated = False
-                            if len(df) > 20:
-                                truncated = True
-                                display_df = df.head(20)
-                            else:
-                                display_df = df
-
-                            print(f"[SET SESSION] Storing DataFrame: {len(display_df)} rows, truncated={truncated}")
-                            st.session_state.last_query_df = display_df
-                            st.session_state.last_query_truncated = truncated
-                            row_count_msg = f"more than 20" if truncated else str(len(df))
-                            res = f"✅ Success! Returned {row_count_msg} rows."
-                            print(f"[SUCCESS] Query executed. Rows returned: {len(df)}. Displaying: {len(display_df)}")
-                            st.success(res)
-                            audit_logger.log_query("EXECUTED", sql_to_run, f"Success: {row_count_msg} rows")
-                            st.session_state.chat_history.append({"role": "assistant", "content": res, "timestamp": datetime.now(), "type": "result"})
-                            st.session_state.approval_mode = False
-                        except Exception as e:
-                            res = f"❌ Query Error: {str(e)}"
-                            print(f"[QUERY ERROR] {e}")
-                            st.error(res)
-                            audit_logger.log_query("ERROR", sql_to_run, str(e))
-                            st.session_state.chat_history.append({"role": "assistant", "content": res, "timestamp": datetime.now(), "type": "result"})
-                    print(f"[EXECUTE COMPLETE] approval_mode set to False, DataFrame stored")
-                    st.rerun()
+            st.rerun()
 
 
     # Render chat
@@ -557,21 +512,22 @@ Return ONLY the improved SQL query, nothing else:"""
         render_chat()
     
     # Display table results (always show when DataFrame exists)
-    print(f"[TABLE CHECK] approval_mode={st.session_state.approval_mode}, last_query_df={'None' if st.session_state.last_query_df is None else 'Present'}")
     if st.session_state.last_query_df is not None:
-        print(f"[TABLE DISPLAY] Showing DataFrame with {len(st.session_state.last_query_df)} rows")
         st.markdown("---")
         st.subheader("📊 Query Results")
-        if isinstance(st.session_state.last_query_df, pd.DataFrame) and len(st.session_state.last_query_df) > 0:
-            # Use st.dataframe for better rendering and scrollability
-            st.dataframe(st.session_state.last_query_df, use_container_width=True, height=400)
+        df_display = st.session_state.last_query_df
+        if isinstance(df_display, pd.DataFrame) and len(df_display) > 0:
+            # Ensure display-safe types for st.table (e.g. datetime/bytes can break rendering)
+            try:
+                display_copy = df_display.astype(str)
+            except Exception:
+                display_copy = df_display
+            st.table(display_copy)
             if st.session_state.get("last_query_truncated"):
-                st.warning("⚠️ Table is too big to get displayed here (showing first 20 rows)")
+                st.info("⚠️ Too many records to be printed here")
         else:
             st.info("No rows returned by the query.")
     else:
-        print(f"[TABLE SKIP] last_query_df is None")
-        
         # Explain button
         if st.session_state.last_sql_query:
             if st.button("💡 Explain Last SQL"):
