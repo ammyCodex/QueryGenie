@@ -25,61 +25,139 @@ except ValueError as e:
 # Page setup
 st.set_page_config(page_title="🪄 QueryGenie", layout="wide")
 
-# Custom CSS
+# Custom CSS – UI only, no backend changes
 custom_css = """
 <style>
+/* Base */
 body, .block-container {
-    background-color: #121212;
-    color: #e0e0e0;
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: linear-gradient(160deg, #0f0f12 0%, #1a1a22 50%, #12121a 100%);
+    color: #e8e8ed;
+    font-family: 'Segoe UI', 'SF Pro Text', system-ui, sans-serif;
 }
 [data-testid="stSidebar"] {
-    background-color: #1f1f1f;
+    background: linear-gradient(180deg, #16161c 0%, #1c1c24 100%);
     color: #e0e0e0;
 }
-.chat-bubble {
-    display: flex;
-    flex-direction: column;
-    margin: 12px 0;
-    padding: 12px 16px;
-    border: none;
-    background-color: #1e1e1e;
-    border-radius: 10px;
-    color: #f5f5f5;
-    animation: fadeIn 0.4s ease-in;
+[data-testid="stSidebar"] .stMarkdown { color: #c8c8d0; }
+
+/* Main title */
+h1 {
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    background: linear-gradient(135deg, #e8e8ed 0%, #a78bfa 50%, #67d391 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
 }
-.chat-bubble.user {
-    background-color: #2a5a8a;
-    margin-left: 20%;
+
+/* Chat cards */
+.chat-card {
+    background: linear-gradient(145deg, #1c1c24 0%, #18181f 100%);
+    border-radius: 14px;
+    padding: 18px 20px;
+    margin: 14px 0;
+    border-left: 4px solid #7c3aed;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+    animation: fadeIn 0.35s ease-out;
 }
-.chat-bubble.assistant {
-    background-color: #2d3d4d;
-    margin-right: 10%;
+.chat-card:hover {
+    box-shadow: 0 6px 24px rgba(124, 58, 237, 0.12);
 }
-.chat-author {
+.chat-card-label {
     font-weight: 600;
-    font-size: 12px;
-    color: #aaa;
+    font-size: 13px;
     margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    letter-spacing: 0.02em;
 }
-.history-item {
-    padding: 10px 12px;
-    background-color: #1a1a1a;
-    border-left: 3px solid #2a5a8a;
-    margin: 6px 0;
-    border-radius: 4px;
-    font-size: 12px;
-    cursor: pointer;
+.chat-card-label.question { color: #a78bfa; }
+.chat-card-label.result { color: #68d391; }
+.chat-card-ts {
+    font-size: 11px;
+    color: #6b7280;
+    margin-bottom: 8px;
+    font-variant-numeric: tabular-nums;
+}
+.chat-card-content {
+    color: #f0f0f5;
+    font-size: 14px;
+    line-height: 1.6;
+    margin-top: 4px;
+}
+
+/* In-card SQL block */
+.chat-sql-block {
+    background: #16161e !important;
+    padding: 14px 16px !important;
+    border-radius: 10px !important;
+    border: 1px solid #2d2d38 !important;
+    overflow-x: auto !important;
+    font-size: 13px !important;
+    line-height: 1.5 !important;
+    color: #a5b4fc !important;
+    margin: 6px 0 0 0 !important;
+}
+.chat-card pre { border-radius: 10px; border: 1px solid #2d2d38; }
+
+/* Caption under title */
+.stCaptionContainer { color: #6b7280 !important; }
+
+/* Section headers */
+h2, h3 {
+    color: #e0e0e8 !important;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+}
+hr {
+    border-color: #2d2d38 !important;
+    opacity: 0.8;
+}
+
+/* Buttons */
+.stButton > button {
+    border-radius: 10px !important;
+    font-weight: 600 !important;
+    transition: all 0.2s ease !important;
+    border: 1px solid rgba(255,255,255,0.08) !important;
+}
+.stButton > button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+}
+
+/* Text area */
+[data-testid="stTextArea"] textarea {
+    border-radius: 12px !important;
+    border: 1px solid #2d2d38 !important;
+    background: #1a1a22 !important;
+}
+
+/* Expanders (sidebar) */
+.streamlit-expanderHeader {
+    background: #1c1c24 !important;
+    border-radius: 8px !important;
+}
+[data-testid="stExpander"] {
+    background: rgba(28,28,36,0.6) !important;
+    border-radius: 10px !important;
+    border: 1px solid #2d2d38 !important;
+}
+
+/* Table / dataframe container */
+[data-testid="stTable"], .stTable {
+    border-radius: 12px !important;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
 }
-.history-item:hover {
-    background-color: #222;
-    border-left-color: #3a7aaa;
+
+/* Info / success messages */
+.stAlert {
+    border-radius: 10px !important;
 }
+
 @keyframes fadeIn {
-  from { opacity: 0; transform: translateY(10px); }
+  from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
 }
 </style>
@@ -321,27 +399,52 @@ def explain_sql(sql):
     resp = co.chat(model=COHERE_MODEL, message=prompt, temperature=0.2, max_tokens=50)
     return resp.text.strip()
 
+def _escape(s):
+    return s.replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
+
 def render_chat():
-    for entry in st.session_state.chat_history:
-        ts = entry["timestamp"].strftime('%H:%M:%S')
-        if entry["type"] in ["user", "assistant", "result"]:
-            role = "You" if entry["type"] == "user" else "🤖 Assistant"
-            bubble_class = "user" if entry["type"] == "user" else "assistant"
-            content_html = entry["content"].replace("\n", "<br>").replace("```sql", "<b>SQL:</b><br/>").replace("```", "")
-            st.markdown(f'''<div class="chat-bubble {bubble_class}">
-                <div class="chat-author">{role} • {ts}</div>
-                {content_html}
-            </div>''', unsafe_allow_html=True)
-        else:
-            st.markdown(f"*{entry['content']}*")
+    """Render chat in card style: Question (purple icon) + Result (green check) with (timestamp)."""
+    i = 0
+    while i < len(st.session_state.chat_history):
+        entry = st.session_state.chat_history[i]
+        if entry["type"] != "user":
+            i += 1
+            continue
+        ts_q = entry["timestamp"].strftime("%H:%M:%S")
+        user_content = _escape(entry["content"])
+        results = []
+        j = i + 1
+        while j < len(st.session_state.chat_history) and st.session_state.chat_history[j]["type"] in ("assistant", "result"):
+            results.append(st.session_state.chat_history[j])
+            j += 1
+        i = j
+
+        parts = [
+            '<div class="chat-card">',
+            '<div class="chat-card-label question">💬 Question</div>',
+            f'<div class="chat-card-ts">({ts_q})</div>',
+            f'<div class="chat-card-content">{user_content}</div>',
+        ]
+        for r in results:
+            ts_r = r["timestamp"].strftime("%H:%M:%S")
+            content = r["content"]
+            parts.append('<div class="chat-card-label result">✅ Result</div>')
+            parts.append(f'<div class="chat-card-ts">({ts_r})</div>')
+            if "SELECT" in content.upper() or "```" in content or content.strip().endswith(";"):
+                sql = content.strip().replace("```sql", "").replace("```", "").strip()
+                parts.append(f'<pre class="chat-sql-block"><code>{_escape(sql)}</code></pre>')
+            else:
+                parts.append(f'<div class="chat-card-content">{_escape(content)}</div>')
+        parts.append("</div>")
+        st.markdown("\n".join(parts), unsafe_allow_html=True)
 
 # Main Layout: Left content area + Right sidebar
 col_main, col_history = st.columns([3, 1])
 
 with col_main:
     st.title("💬 Chat with Your Database")
-    
-    query = st.text_area("Ask your database...", height=100, key="chat_input", placeholder="e.g., Show all users from 2024")
+    st.caption("Ask in plain English → get SQL → approve & see results.")
+    query = st.text_area("Ask your database...", height=100, key="chat_input", placeholder="e.g., List all actors • Show top 10 orders by date • Count users by role")
 
     # Run execution every run when user clicked Execute (must be outside Send block)
     # Uses same LLM-generated query from session state (pending_sql) to fetch from DB
@@ -374,6 +477,7 @@ with col_main:
     # Show Review SQL and Execute/Improve when in approval mode (runs every run so Execute click is handled)
     if st.session_state.approval_mode and st.session_state.pending_sql:
         st.markdown("### 📝 Review Generated SQL")
+        st.caption("Approve and run, or ask the AI to improve the query.")
         st.code(st.session_state.pending_sql, language="sql")
         cols_action = st.columns(2, gap="medium")
         if cols_action[0].button("✅ Execute", use_container_width=True, key="btn_execute"):
