@@ -345,7 +345,6 @@ with col_main:
         else:
             st.session_state.chat_history.append({"role": "user", "content": query, "timestamp": datetime.now(), "type": "user"})
             print(f"\n[USER QUERY] {query}")
-            print(f"[SCHEMA SELECTION] Selected {len(schema_str.split('**')) - 1} tables")
 
             # Generate SQL - select relevant subset of schema to avoid token limits
             # Semantic selection: try to use FAISS-based semantic retrieval of relevant tables
@@ -373,6 +372,9 @@ with col_main:
             except Exception:
                 # fallback to heuristic selection
                 schema_str = select_relevant_schema(st.session_state.schema_dict, query, max_tables=6)
+            
+            # Print schema selection after it's defined
+            print(f"[SCHEMA SELECTION] Selected {len(schema_str.split('**')) - 1} tables")
 
             prompt = f"""You are an expert SQLite assistant. Generate valid SQLite SQL based on user request and DB schema.
 
