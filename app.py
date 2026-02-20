@@ -251,7 +251,7 @@ if st.button("Send"):
                     st.session_state.improve_rounds += 1
                     st.session_state.chat_history.append({"role": "assistant", "content": new_sql, "timestamp": datetime.now(), "type": "assistant"})
                     audit_logger.log_query("PENDING", new_sql, f"Improved query (round {st.session_state.improve_rounds})")
-                    st.experimental_rerun()
+                    st.rerun()
 
             if edit:
                 edited_sql = st.text_area("Edit SQL before execution:", value=st.session_state.pending_sql, height=120, key="edited_sql_area")
