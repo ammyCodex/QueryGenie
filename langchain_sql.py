@@ -29,21 +29,18 @@ def generate_sql_with_langchain(schema_str: str, user_request: str) -> str:
     if LCohere is None:
         raise ImportError("LangChain or its Cohere LLM wrapper is not available. Install 'langchain' and try again.")
 
-    # Strict prompt: explicitly forbid use of external/world data and require the model
-    # to only reference tables/columns present in the provided schema string.
-    # If the request cannot be satisfied using schema alone, the model MUST respond
-    # with the exact token: NO_VALID_SQL
+    # Pragmatic prompt: be helpful while staying grounded in the schema
     prompt_template = (
-        "You are an expert SQLite assistant. ONLY use the database schema provided below. "
-        "Do NOT use any external knowledge or assume any tables/columns that are not listed.\n\n"
-        "BE STRICT: If the user request cannot be satisfied with the given schema, reply with EXACT TEXT: NO_VALID_SQL (no SQL, no explanation).\n\n"
-        "Respond with ONLY the SQL query and NOTHING ELSE when possible. Do not wrap in markdown fences.\n\n"
-        "Schema (tables and columns):\n{schema}\n\nUser Request:\n{request}\n\nSQL:" 
+        "You are a SQLite SQL expert. Generate a SQL query to answer the user's request.\n\n"
+        "CRITICAL: Use ONLY tables and columns from the schema below. Do NOT invent or assume tables.\n"
+        "If the request is impossible with the given schema, respond with: NO_VALID_SQL\n\n"
+        "Output ONLY valid SQLite SQL. No explanation, no markdown, no prose.\n\n"
+        "Schema:\n{schema}\n\nRequest:\n{request}\n\nSQL:"
     )
 
     template = PromptTemplate(template=prompt_template, input_variables=["schema", "request"])
-    # Use deterministic settings to reduce hallucination
-    llm = LCohere(api_key=COHERE_API_KEY, model=COHERE_MODEL, temperature=0.0, max_tokens=400)
+    # Slightly relaxed temperature for flexibility while staying on-task
+    llm = LCohere(api_key=COHERE_API_KEY, model=COHERE_MODEL, temperature=0.1, max_tokens=300)
     chain = LLMChain(llm=llm, prompt=template)
     resp = chain.run({"schema": schema_str, "request": user_request})
     return clean_sql_output(resp)

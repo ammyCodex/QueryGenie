@@ -217,6 +217,7 @@ def is_probable_sql(text: str) -> bool:
 
 
 def validate_sql_against_schema(sql_text: str, schema_dict: dict) -> bool:
+    """Lightweight validation: ensure SQL references at least one allowed table/column."""
     if not sql_text:
         return False
     if sql_text.strip().upper() == "NO_VALID_SQL":
@@ -233,12 +234,9 @@ def validate_sql_against_schema(sql_text: str, schema_dict: dict) -> bool:
     tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", sql_text)
     tokens = [tok.lower() for tok in tokens]
 
+    # Require at least one allowed identifier (table or column name)
     allowed_matches = sum(1 for tok in tokens if tok in allowed)
     if allowed_matches == 0:
-        return False
-
-    non_keywords = [tok for tok in tokens if tok not in SQL_KEYWORDS and tok not in allowed]
-    if len(non_keywords) / max(1, len(tokens)) > 0.3:
         return False
 
     return True
@@ -391,10 +389,18 @@ Only SQL, no explanation:"""
                     )
                     sql = generate_sql(strict_prompt)
 
-                # Validate generated SQL against schema; reject hallucinations
+                # Validate and retry if needed: if validation fails, try a simpler fallback prompt
                 try:
                     if not validate_sql_against_schema(sql, st.session_state.schema_dict):
-                        sql = "NO_VALID_SQL"
+                        # Retry with a simpler, forced prompt
+                        simple_prompt = f"Generate SQLite SQL for: {query}\n\nTables and columns:\n{schema_str}\n\nRespond with ONLY SQL:"
+                        try:
+                            sql = generate_sql(simple_prompt)
+                            # Validate again
+                            if not validate_sql_against_schema(sql, st.session_state.schema_dict):
+                                sql = "NO_VALID_SQL"
+                        except Exception:
+                            sql = "NO_VALID_SQL"
                 except Exception:
                     sql = "NO_VALID_SQL"
 
@@ -411,12 +417,14 @@ Only SQL, no explanation:"""
             st.session_state.approval_mode = True
             st.markdown("### 📝 Review Generated SQL")
             st.code(st.session_state.pending_sql, language="sql")
-            # Debug: show schema and generated SQL to verify generator used only schema
-            with st.expander("Debug: schema passed to LLM and generated SQL"):
+            # Debug: show what was passed and generated
+            with st.expander("🔍 Debug: Schema, Query, and Generated SQL"):
+                st.markdown("**User Request:**")
+                st.text(query)
                 st.markdown("**Schema passed to generator:**")
                 st.text(schema_str)
                 st.markdown("**Generated SQL:**")
-                st.text(st.session_state.pending_sql)
+                st.code(st.session_state.pending_sql if st.session_state.pending_sql != "NO_VALID_SQL" else "[Could not generate valid SQL]", language="sql")
             
             cols_action = st.columns(2, gap="medium")
 
@@ -449,10 +457,16 @@ Return ONLY the improved SQL query, nothing else:"""
                         except Exception:
                             new_sql = generate_sql(improve_prompt)
 
-                    # Validate improved SQL
+                    # Validate improved SQL; retry if needed
                     try:
                         if not validate_sql_against_schema(new_sql, st.session_state.schema_dict):
-                            new_sql = "NO_VALID_SQL"
+                            simple_prompt = f"Improve and generate SQLite SQL for: {query}\n\nTables:\n{schema_str}\n\nRespond with ONLY SQL:"
+                            try:
+                                new_sql = generate_sql(simple_prompt)
+                                if not validate_sql_against_schema(new_sql, st.session_state.schema_dict):
+                                    new_sql = "NO_VALID_SQL"
+                            except Exception:
+                                new_sql = "NO_VALID_SQL"
                     except Exception:
                         new_sql = "NO_VALID_SQL"
                     
