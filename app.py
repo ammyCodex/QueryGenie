@@ -324,9 +324,10 @@ Return ONLY the improved SQL query, nothing else:"""
             elif st.session_state.action_taken == "edit":
                 st.markdown("### ✏️ Edit SQL")
                 edited_sql = st.text_area("Modify the SQL query:", value=st.session_state.pending_sql, height=120, key="edited_sql_area")
-                st.session_state.pending_sql = edited_sql
                 
-                if st.button("✅ Execute Edited SQL", use_container_width=True, key="exec_edited_now"):
+                col_edit_btn = st.columns(1)
+                if col_edit_btn[0].button("✅ Execute Edited SQL", use_container_width=True, key="exec_edited_now"):
+                    st.session_state.pending_sql = edited_sql  # Save edited SQL
                     st.session_state.action_taken = "execute"
                     st.rerun()
             
@@ -336,11 +337,21 @@ Return ONLY the improved SQL query, nothing else:"""
                 
                 with st.spinner("⏳ Executing query..."):
                     try:
+                        # Fetch ALL records from the query
                         df = pd.read_sql_query(sql_to_run, st.session_state.conn)
                         st.session_state.last_query_df = df
-                        res = f"✅ Success! Returned {len(df)} rows."
+                        row_count = len(df)
+                        res = f"✅ Success! Returned {row_count} rows."
                         st.success(res)
-                        audit_logger.log_query("EXECUTED", sql_to_run, f"Success: {len(df)} rows")
+                        audit_logger.log_query("EXECUTED", sql_to_run, f"Success: {row_count} rows")
+                        
+                        # Display results immediately in a table
+                        if row_count > 0:
+                            st.markdown("### 📊 Query Results")
+                            st.table(df)
+                        else:
+                            st.info("Query executed but returned no records.")
+                            
                     except Exception as e:
                         res = f"❌ Query Error: {str(e)}"
                         st.error(res)
@@ -355,10 +366,11 @@ Return ONLY the improved SQL query, nothing else:"""
         st.markdown("---")
         render_chat()
 
-    # Show results (only if execution happened)
+    # Show results (if available and execution happened)
     if st.session_state.last_query_df is not None and len(st.session_state.last_query_df) > 0:
-        st.subheader("📊 Results")
-        st.dataframe(st.session_state.last_query_df, use_container_width=True)
+        st.markdown("---")
+        st.subheader("📋 All Query Results")
+        st.table(st.session_state.last_query_df)
         
         # Explain button
         if st.session_state.last_sql_query:
@@ -370,7 +382,6 @@ Return ONLY the improved SQL query, nothing else:"""
 # Right sidebar: Chat History
 with col_history:
     st.markdown("### 💬 Chat History")
-    st.markdown(f"*({len(st.session_state.chat_history)}/10)*")
     
     if len(st.session_state.chat_history) == 0:
         st.info("No conversations yet.\nAsk a question to get started!")
