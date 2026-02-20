@@ -11,6 +11,7 @@ import time
 # Import new modules
 from config import COHERE_API_KEY, COHERE_MODEL, validate_config
 from logging_audit import audit_logger
+from semantic_schema import build_faiss_from_schema, query_relevant_tables
 
 # Validate configuration
 try:
@@ -114,6 +115,8 @@ if "last_query_df" not in st.session_state:
     st.session_state.last_query_df = None
 if "last_sql_query" not in st.session_state:
     st.session_state.last_sql_query = None
+if "last_query_truncated" not in st.session_state:
+    st.session_state.last_query_truncated = False
 if "pending_sql" not in st.session_state:
     st.session_state.pending_sql = None
 if "improve_rounds" not in st.session_state:
@@ -204,6 +207,52 @@ with st.sidebar:
 def clean_sql_output(text):
     return re.sub(r"```(?:sql)?\s*(.*?)```", r"\1", text, flags=re.DOTALL | re.IGNORECASE).strip()
 
+
+def select_relevant_schema(schema_dict, user_request, max_tables=5):
+    """Select up to `max_tables` from `schema_dict` that are most relevant to `user_request`.
+
+    This is a lightweight heuristic to avoid sending the entire schema to the LLM
+    while keeping relevance high. It matches tokens from the user request against
+    table names and column names and ranks tables by match count.
+    """
+    if not schema_dict:
+        return "No tables available"
+
+    tokens = re.findall(r"\w+", user_request.lower())
+    token_set = set(tokens)
+
+    scores = []
+    for table, cols in schema_dict.items():
+        score = 0
+        tname = table.lower()
+        # match table name
+        for tk in token_set:
+            if tk in tname:
+                score += 3
+        # match columns
+        for c in cols:
+            cname = c.lower()
+            for tk in token_set:
+                if tk in cname:
+                    score += 1
+
+        scores.append((score, table))
+
+    # sort by score desc
+    scores.sort(reverse=True)
+    selected = [t for s, t in scores if s > 0][:max_tables]
+
+    # fallback: if nothing matched, include the first `max_tables` tables
+    if not selected:
+        selected = list(schema_dict.keys())[:max_tables]
+
+    # build schema string from selected tables
+    parts = []
+    for t in selected:
+        cols = schema_dict.get(t, [])
+        parts.append(f"**{t}**: {', '.join(cols)}")
+    return "\n".join(parts)
+
 def generate_sql(prompt):
     # Try to use LangChain helper if available (preferred)
     try:
@@ -256,12 +305,33 @@ with col_main:
         else:
             st.session_state.chat_history.append({"role": "user", "content": query, "timestamp": datetime.now(), "type": "user"})
 
-            # Generate SQL
-            schema_str = "\n".join([
-                f"**{t}**: {', '.join(cols)}" 
-                for t, cols in st.session_state.schema_dict.items()
-            ]) if st.session_state.schema_dict and "_error" not in st.session_state.schema_dict else "No tables available"
-            
+            # Generate SQL - select relevant subset of schema to avoid token limits
+            # Semantic selection: try to use FAISS-based semantic retrieval of relevant tables
+            try:
+                schema_hash = "|".join([f"{t}:{','.join(v)}" for t, v in sorted(st.session_state.schema_dict.items())])
+                if ("faiss_schema_hash" not in st.session_state) or (st.session_state.get("faiss_schema_hash") != schema_hash):
+                    # build and cache
+                    try:
+                        st.session_state.faiss_store = build_faiss_from_schema(st.session_state.schema_dict)
+                        st.session_state.faiss_schema_hash = schema_hash
+                    except Exception:
+                        st.session_state.faiss_store = None
+                        st.session_state.faiss_schema_hash = None
+
+                if st.session_state.get("faiss_store") is not None:
+                    tables = query_relevant_tables(st.session_state.faiss_store, query, k=6)
+                    if tables:
+                        # build schema_str from selected tables
+                        parts = [f"**{t}**: {', '.join(st.session_state.schema_dict[t])}" for t in tables]
+                        schema_str = "\n".join(parts)
+                    else:
+                        schema_str = select_relevant_schema(st.session_state.schema_dict, query, max_tables=6)
+                else:
+                    schema_str = select_relevant_schema(st.session_state.schema_dict, query, max_tables=6)
+            except Exception:
+                # fallback to heuristic selection
+                schema_str = select_relevant_schema(st.session_state.schema_dict, query, max_tables=6)
+
             prompt = f"""You are an expert SQLite assistant. Generate valid SQLite SQL based on user request and DB schema.
 
 User Request:
@@ -278,7 +348,14 @@ Only SQL, no explanation:"""
                 try:
                     sql = generate_sql({"schema": schema_str, "request": query})
                 except Exception:
-                    sql = generate_sql(prompt)
+                    # Fallback: call Cohere directly but pass a strict prompt that forbids
+                    # using any external/world knowledge and limits references to the schema.
+                    strict_prompt = (
+                        "ONLY USE THE FOLLOWING SCHEMA. DO NOT INVENT TABLES OR COLUMNS. "
+                        "If impossible, respond with EXACT TEXT: NO_VALID_SQL.\n\n"
+                        f"Schema:\n{schema_str}\n\nUser Request:\n{query}\n\nSQL:"
+                    )
+                    sql = generate_sql(strict_prompt)
 
             audit_logger.log_query("PENDING", sql, "Generated by AI, awaiting user approval")
 
@@ -293,19 +370,21 @@ Only SQL, no explanation:"""
             st.session_state.approval_mode = True
             st.markdown("### 📝 Review Generated SQL")
             st.code(st.session_state.pending_sql, language="sql")
+            # Debug: show schema and generated SQL to verify generator used only schema
+            with st.expander("Debug: schema passed to LLM and generated SQL"):
+                st.markdown("**Schema passed to generator:**")
+                st.text(schema_str)
+                st.markdown("**Generated SQL:**")
+                st.text(st.session_state.pending_sql)
             
-            cols_action = st.columns(3, gap="medium")
-            
+            cols_action = st.columns(2, gap="medium")
+
             if cols_action[0].button("✅ Execute", use_container_width=True, key=f"exec_{datetime.now().timestamp()}"):
                 st.session_state.action_taken = "execute"
                 st.rerun()
-            
+
             if cols_action[1].button("🔄 Improve", use_container_width=True, key=f"impr_{datetime.now().timestamp()}"):
                 st.session_state.action_taken = "improve"
-                st.rerun()
-            
-            if cols_action[2].button("✏️ Edit", use_container_width=True, key=f"edit_{datetime.now().timestamp()}"):
-                st.session_state.action_taken = "edit"
                 st.rerun()
             
             # Handle actions after button click
@@ -336,28 +415,34 @@ Return ONLY the improved SQL query, nothing else:"""
                     st.session_state.action_taken = None
                     st.rerun()
             
-            elif st.session_state.action_taken == "edit":
-                st.markdown("### ✏️ Edit SQL")
-                edited_sql = st.text_area("Modify the SQL query:", value=st.session_state.pending_sql, height=120, key="edited_sql_area")
-                
-                if st.button("✅ Execute Edited SQL", use_container_width=True, key="exec_edited_now"):
-                    st.session_state.pending_sql = edited_sql  # Save edited SQL
-                    st.session_state.action_taken = "execute"
-                    st.rerun()
-            
             elif st.session_state.action_taken == "execute":
                 sql_to_run = st.session_state.pending_sql
                 audit_logger.log_approval(sql_to_run, approved=True)
                 
                 with st.spinner("⏳ Executing query..."):
                     try:
-                        # Fetch ALL records from the query
-                        df = pd.read_sql_query(sql_to_run, st.session_state.conn)
-                        st.session_state.last_query_df = df
-                        row_count = len(df)
-                        res = f"✅ Success! Returned {row_count} rows."
+                        # Try to fetch up to 21 rows to detect overflow (we'll show max 20)
+                        try:
+                            limited_sql = f"SELECT * FROM ({sql_to_run}) LIMIT 21"
+                            df = pd.read_sql_query(limited_sql, st.session_state.conn)
+                        except Exception:
+                            # Fallback: run the original query and then trim
+                            df = pd.read_sql_query(sql_to_run, st.session_state.conn)
+
+                        truncated = False
+                        if len(df) > 20:
+                            truncated = True
+                            display_df = df.head(20)
+                        else:
+                            display_df = df
+
+                        st.session_state.last_query_df = display_df
+                        st.session_state.last_query_truncated = truncated
+                        # Row count for history message (best-effort)
+                        row_count_msg = f"more than 20" if truncated else str(len(df))
+                        res = f"✅ Success! Returned {row_count_msg} rows."
                         st.success(res)
-                        audit_logger.log_query("EXECUTED", sql_to_run, f"Success: {row_count} rows")
+                        audit_logger.log_query("EXECUTED", sql_to_run, f"Success: {row_count_msg} rows")
                         
                     except Exception as e:
                         res = f"❌ Query Error: {str(e)}"
@@ -382,6 +467,8 @@ Return ONLY the improved SQL query, nothing else:"""
         st.subheader("📊 Query Results")
         if isinstance(st.session_state.last_query_df, pd.DataFrame) and len(st.session_state.last_query_df) > 0:
             st.table(st.session_state.last_query_df)
+            if st.session_state.get("last_query_truncated"):
+                st.warning("Table is too big to get displayed here")
         else:
             st.info("No rows returned by the query.")
         

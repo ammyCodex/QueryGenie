@@ -11,6 +11,9 @@ SQLAlchemy>=2.0
 # LangChain for LLM orchestration
 langchain>=0.1
 
+# FAISS for semantic table selection
+faiss-cpu>=1.7.4
+
 # Configuration
 python-dotenv>=1.0
 
