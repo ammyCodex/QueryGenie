@@ -300,6 +300,55 @@ def clean_sql_output(text):
     return re.sub(r"```(?:sql)?\s*(.*?)```", r"\1", text, flags=re.DOTALL | re.IGNORECASE).strip()
 
 
+def extract_sql_from_llm_response(text: str) -> str:
+    """Extract a single SQL statement from LLM output that may contain explanation, markdown, or multiple queries."""
+    if not text or not text.strip():
+        return text
+    raw = text.strip()
+    # Remove common artifacts
+    raw = re.sub(r"\[object Object\]|,object Object\]", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r",\s*,\s*", ", ", raw)
+
+    # 1) Try ```sql ... ``` or ``` ... ``` blocks first
+    for pattern in [r"```sql\s*(.*?)```", r"```\s*(.*?)```"]:
+        matches = re.findall(pattern, raw, flags=re.DOTALL | re.IGNORECASE)
+        for m in matches:
+            block = m.strip()
+            if re.search(r"\b(select|with)\b", block, re.IGNORECASE):
+                # Take first statement only (up to first ;)
+                first_stmt = block.split(";")[0].strip()
+                if first_stmt and len(first_stmt) > 10:
+                    return first_stmt + ";" if not first_stmt.endswith(";") else first_stmt
+
+    # 2) No code block: find line that starts with SELECT or WITH, then collect until ;
+    lines = raw.split("\n")
+    start = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if re.match(r"^\s*(select|with)\s+", stripped, re.IGNORECASE):
+            start = i
+            break
+    if start is not None:
+        collected = []
+        for i in range(start, len(lines)):
+            line = lines[i]
+            s = line.strip().lower()
+            # Stop before adding obvious non-SQL (markdown or explanation)
+            if s.startswith("###") or (s.startswith("**") and not s.startswith("**`")) or "explanation" in s or "both queries" in s:
+                break
+            collected.append(line)
+            if line.strip().endswith(";"):
+                break
+        out = "\n".join(collected).strip()
+        if out and re.search(r"\b(select|with)\b", out, re.IGNORECASE):
+            if not out.endswith(";"):
+                out = out + ";"
+            return out
+
+    # 3) Fallback: use existing clean_sql_output (may return full text)
+    return clean_sql_output(text)
+
+
 SQL_KEYWORDS = {"select", "from", "where", "join", "on", "and", "or", "group", "by", "order", "limit", "distinct", "as", "count", "sum", "avg", "min", "max", "inner", "left", "right", "full", "outer", "having", "union", "all", "in", "not", "exists", "between", "like", "is", "null", "case", "when", "then", "else", "end", "offset"}
 
 
@@ -383,13 +432,13 @@ def generate_sql(prompt):
     # Try to use LangChain helper if available (preferred)
     try:
         from langchain_sql import generate_sql_with_langchain
-        # The prompt we pass in is expected to include schema and user context already
-        return generate_sql_with_langchain(prompt.get("schema", ""), prompt.get("request", ""))
+        raw = generate_sql_with_langchain(prompt.get("schema", ""), prompt.get("request", ""))
+        return extract_sql_from_llm_response(raw)
     except Exception:
         # Fallback: use direct Cohere client with the provided raw prompt string (no nested spinner)
         try:
             resp = co.chat(model=COHERE_MODEL, message=prompt if isinstance(prompt, str) else prompt.get("request", ""), temperature=0.3, max_tokens=400)
-            return clean_sql_output(resp.text)
+            return extract_sql_from_llm_response(resp.text)
         except Exception as e:
             st.error(f"Error generating SQL: {str(e)}")
             raise
