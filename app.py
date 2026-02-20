@@ -325,8 +325,7 @@ Return ONLY the improved SQL query, nothing else:"""
                 st.markdown("### ✏️ Edit SQL")
                 edited_sql = st.text_area("Modify the SQL query:", value=st.session_state.pending_sql, height=120, key="edited_sql_area")
                 
-                col_edit_btn = st.columns(1)
-                if col_edit_btn[0].button("✅ Execute Edited SQL", use_container_width=True, key="exec_edited_now"):
+                if st.button("✅ Execute Edited SQL", use_container_width=True, key="exec_edited_now"):
                     st.session_state.pending_sql = edited_sql  # Save edited SQL
                     st.session_state.action_taken = "execute"
                     st.rerun()
@@ -345,32 +344,31 @@ Return ONLY the improved SQL query, nothing else:"""
                         st.success(res)
                         audit_logger.log_query("EXECUTED", sql_to_run, f"Success: {row_count} rows")
                         
-                        # Display results immediately in a table
-                        if row_count > 0:
-                            st.markdown("### 📊 Query Results")
-                            st.table(df)
-                        else:
-                            st.info("Query executed but returned no records.")
-                            
                     except Exception as e:
                         res = f"❌ Query Error: {str(e)}"
                         st.error(res)
                         audit_logger.log_query("ERROR", sql_to_run, str(e))
                 
+                # Save result to history and switch out of approval mode so results render
                 st.session_state.chat_history.append({"role": "assistant", "content": res, "timestamp": datetime.now(), "type": "result"})
                 st.session_state.action_taken = None
+                st.session_state.approval_mode = False
+                # Rerun so the UI refreshes and shows the results/table
                 st.rerun()
 
     # Render chat
     if not st.session_state.approval_mode:
         st.markdown("---")
         render_chat()
-
-    # Show results (if available and execution happened)
-    if st.session_state.last_query_df is not None and len(st.session_state.last_query_df) > 0:
+    
+    # Display table results after chat (always show when DataFrame exists)
+    if st.session_state.last_query_df is not None:
         st.markdown("---")
-        st.subheader("📋 All Query Results")
-        st.table(st.session_state.last_query_df)
+        st.subheader("📊 Query Results")
+        if isinstance(st.session_state.last_query_df, pd.DataFrame) and len(st.session_state.last_query_df) > 0:
+            st.table(st.session_state.last_query_df)
+        else:
+            st.info("No rows returned by the query.")
         
         # Explain button
         if st.session_state.last_sql_query:
@@ -386,15 +384,28 @@ with col_history:
     if len(st.session_state.chat_history) == 0:
         st.info("No conversations yet.\nAsk a question to get started!")
     else:
-        # Show last 10 conversations
-        for i, entry in enumerate(reversed(st.session_state.chat_history[-10:])):
-            if entry["type"] == "user":
-                content_preview = entry["content"][:40] + "..." if len(entry["content"]) > 40 else entry["content"]
-                st.markdown(f"""
-                <div class="history-item">
-                📝 {content_preview}
-                </div>
-                """, unsafe_allow_html=True)
+        # Show last 10 user questions as expandable dropdowns (most recent first)
+        user_indices = [i for i, e in enumerate(st.session_state.chat_history) if e.get("type") == "user"]
+        for idx in reversed(user_indices[-10:]):
+            question_entry = st.session_state.chat_history[idx]
+            question_text = question_entry["content"] if len(question_entry["content"]) <= 80 else question_entry["content"][:77] + "..."
+
+            with st.expander(question_text):
+                st.markdown(f"**💬 Question** ({question_entry['timestamp'].strftime('%H:%M:%S')})")
+                st.markdown(question_entry["content"])
+
+                # Find the next result (if any)
+                found_answer = False
+                for j in range(idx + 1, len(st.session_state.chat_history)):
+                    subsequent_entry = st.session_state.chat_history[j]
+                    if subsequent_entry.get("type") in ("result", "assistant"):
+                        st.markdown(f"**✅ Result** ({subsequent_entry['timestamp'].strftime('%H:%M:%S')})")
+                        st.markdown(subsequent_entry["content"])
+                        found_answer = True
+                        break
+
+                if not found_answer:
+                    st.info("Pending execution...")
     
     st.markdown("---")
     
