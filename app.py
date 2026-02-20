@@ -486,7 +486,8 @@ Return ONLY the improved SQL query, nothing else:"""
                     st.session_state.action_taken = None
                     # keep approval_mode True so user can Improve or change request
                     st.rerun()
-                audit_logger.log_approval(sql_to_run, approved=True)
+                else:
+                    audit_logger.log_approval(sql_to_run, approved=True)
                 
                 with st.spinner("⏳ Executing query..."):
                     try:
@@ -530,14 +531,15 @@ Return ONLY the improved SQL query, nothing else:"""
         st.markdown("---")
         render_chat()
     
-    # Display table results after chat (always show when DataFrame exists)
+    # Display table results (always show when DataFrame exists)
     if st.session_state.last_query_df is not None:
         st.markdown("---")
         st.subheader("📊 Query Results")
         if isinstance(st.session_state.last_query_df, pd.DataFrame) and len(st.session_state.last_query_df) > 0:
-            st.table(st.session_state.last_query_df)
+            # Use st.dataframe for better rendering and scrollability
+            st.dataframe(st.session_state.last_query_df, use_container_width=True, height=400)
             if st.session_state.get("last_query_truncated"):
-                st.warning("Table is too big to get displayed here")
+                st.warning("⚠️ Table is too big to get displayed here (showing first 20 rows)")
         else:
             st.info("No rows returned by the query.")
         
