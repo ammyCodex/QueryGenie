@@ -10,8 +10,6 @@ import time
 
 # Import new modules
 from config import COHERE_API_KEY, COHERE_MODEL, validate_config
-from query_validator import QueryValidator
-from safe_executor import SafeQueryExecutor
 from logging_audit import audit_logger
 
 # Validate configuration
@@ -24,7 +22,7 @@ except ValueError as e:
 # Page setup
 st.set_page_config(page_title="🪄 QueryGenie", layout="wide")
 
-# Custom CSS for modern dark theme & chat bubbles
+# Custom CSS
 custom_css = """
 <style>
 body, .block-container {
@@ -39,35 +37,43 @@ body, .block-container {
 .chat-bubble {
     display: flex;
     flex-direction: column;
-    margin: 16px 0;
-    padding: 12px 20px;
+    margin: 12px 0;
+    padding: 12px 16px;
     border: none;
     background-color: #1e1e1e;
     border-radius: 10px;
     color: #f5f5f5;
-    max-width: 80%;
     animation: fadeIn 0.4s ease-in;
 }
 .chat-bubble.user {
-    align-self: flex-end;
-    background-color: #2a2a2a;
-    text-align: left;
+    background-color: #2a5a8a;
+    margin-left: 20%;
 }
 .chat-bubble.assistant {
-    align-self: flex-start;
-    background-color: #2d2d2d;
-    text-align: left;
+    background-color: #2d3d4d;
+    margin-right: 10%;
 }
 .chat-author {
     font-weight: 600;
-    font-size: 13px;
-    color: #bbb;
-    display: flex;
-    justify-content: space-between;
-    margin-bottom: 6px;
-    margin-top: -2px;
-    padding-left: 4px;
-    padding-right: 4px;
+    font-size: 12px;
+    color: #aaa;
+    margin-bottom: 4px;
+}
+.history-item {
+    padding: 10px 12px;
+    background-color: #1a1a1a;
+    border-left: 3px solid #2a5a8a;
+    margin: 6px 0;
+    border-radius: 4px;
+    font-size: 12px;
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.history-item:hover {
+    background-color: #222;
+    border-left-color: #3a7aaa;
 }
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(10px); }
@@ -112,8 +118,16 @@ if "pending_sql" not in st.session_state:
     st.session_state.pending_sql = None
 if "improve_rounds" not in st.session_state:
     st.session_state.improve_rounds = 0
+if "schema_dict" not in st.session_state:
+    st.session_state.schema_dict = {}
+if "fk_dict" not in st.session_state:
+    st.session_state.fk_dict = {}
+if "approval_mode" not in st.session_state:
+    st.session_state.approval_mode = False
+if "action_taken" not in st.session_state:
+    st.session_state.action_taken = None
 
-# Sidebar for DB upload and schema display
+# Sidebar for DB upload
 with st.sidebar:
     st.header("🪄 QueryGenie")
     st.subheader("📤 Upload SQLite DB")
@@ -128,8 +142,6 @@ with st.sidebar:
             st.session_state.conn.close()
         st.session_state.conn = sqlite3.connect(st.session_state.db_path, check_same_thread=False)
         st.session_state.cursor = st.session_state.conn.cursor()
-
-        # Reset upload toast flag for every new upload
         st.session_state.upload_shown = False
 
         if not st.session_state.upload_shown:
@@ -142,6 +154,11 @@ with st.sidebar:
             schema = {}
             foreign_keys = {}
             tables = st.session_state.cursor.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()
+            
+            # Check if DB is too big (more than 20 tables)
+            if len(tables) > 20:
+                return {"_error": "DB has too many tables"}, {}
+            
             for (table_name,) in tables:
                 columns = st.session_state.cursor.execute(f"PRAGMA table_info('{table_name}');").fetchall()
                 schema[table_name] = [col[1] for col in columns]
@@ -149,16 +166,37 @@ with st.sidebar:
                 foreign_keys[table_name] = [(fk[3], fk[2]) for fk in fks]
             return schema, foreign_keys
 
-        schema_dict, fk_dict = get_schema()
-        def format_schema(schema, fks):
-            return "\n".join([
-                f"**{t}**: {', '.join(cols)}" + 
-                (f"\nForeign Keys: {', '.join([f'{col} → {ref}' for col, ref in fks[t]])}" if fks[t] else "") 
-                for t, cols in schema.items()
-            ])
+        st.session_state.schema_dict, st.session_state.fk_dict = get_schema()
+        
+        if "_error" not in st.session_state.schema_dict:
+            def format_schema(schema, fks):
+                return "\n".join([
+                    f"**{t}**: {', '.join(cols)}" + 
+                    (f"\nForeign Keys: {', '.join([f'{col} → {ref}' for col, ref in fks[t]])}" if fks[t] else "") 
+                    for t, cols in schema.items()
+                ])
 
-        st.header("📋 DB Schema")
-        st.markdown(format_schema(schema_dict, fk_dict), unsafe_allow_html=True)
+            st.header("📋 DB Schema")
+            st.markdown(format_schema(st.session_state.schema_dict, st.session_state.fk_dict), unsafe_allow_html=True)
+            
+            # DB Records Preview
+            st.header("📊 Records Preview")
+            with st.expander("View Sample Data (Max 10 records per table)"):
+                for table in list(st.session_state.schema_dict.keys())[:5]:
+                    try:
+                        df = pd.read_sql_query(f"SELECT * FROM {table} LIMIT 10", st.session_state.conn)
+                        if len(df) > 0:
+                            st.subheader(f"📋 {table} ({len(df)} records)")
+                            st.dataframe(df, use_container_width=True)
+                        else:
+                            st.info(f"{table}: No records")
+                    except Exception as e:
+                        st.warning(f"{table}: Error loading - {str(e)[:50]}")
+                
+                if len(st.session_state.schema_dict) > 5:
+                    st.warning(f"⚠️ Only showing first 5 tables. Database has {len(st.session_state.schema_dict)} tables.")
+        else:
+            st.warning("🚨 DB is too big to be displayed here (>20 tables)")
     else:
         st.info("Upload a SQLite file above to get started.")
 
@@ -169,7 +207,7 @@ def clean_sql_output(text):
 def generate_sql(prompt):
     with st.spinner("🤖 Generating SQL..."):
         try:
-            resp = co.chat(model=COHERE_MODEL, message=prompt, temperature=0.3, max_tokens=150)
+            resp = co.chat(model=COHERE_MODEL, message=prompt, temperature=0.3, max_tokens=200)
             return clean_sql_output(resp.text)
         except Exception as e:
             st.error(f"Error generating SQL: {str(e)}")
@@ -184,122 +222,173 @@ def render_chat():
     for entry in st.session_state.chat_history:
         ts = entry["timestamp"].strftime('%H:%M:%S')
         if entry["type"] in ["user", "assistant", "result"]:
-            role = "You" if entry["type"] == "user" else "Assistant"
+            role = "You" if entry["type"] == "user" else "🤖 Assistant"
             bubble_class = "user" if entry["type"] == "user" else "assistant"
-            content_html = entry["content"].replace("\n", "<br>").replace("```sql", "").replace("```", "")
+            content_html = entry["content"].replace("\n", "<br>").replace("```sql", "<b>SQL:</b><br/>").replace("```", "")
             st.markdown(f'''<div class="chat-bubble {bubble_class}">
-                <div class="chat-author"><span>{role}</span><span>{ts}</span></div>
+                <div class="chat-author">{role} • {ts}</div>
                 {content_html}
             </div>''', unsafe_allow_html=True)
         else:
             st.markdown(f"*{entry['content']}*")
 
-def is_select_only(sql_text):
-    parsed = sqlparse.parse(sql_text)
-    for stmt in parsed:
-        if stmt.get_type() != "SELECT":
-            return False
-    return True
+# Main Layout: Left content area + Right sidebar
+col_main, col_history = st.columns([3, 1])
 
-# Main UI
-st.title("🪄 QueryGenie")
-query = st.text_area("💬 Ask your database...", height=100, key="chat_input")
+with col_main:
+    st.title("💬 Chat with Your Database")
+    
+    query = st.text_area("Ask your database...", height=100, key="chat_input", placeholder="e.g., Show all users from 2024")
 
-if st.button("Send"):
-    if not query.strip():
-        st.error("Please enter your query.")
-    elif st.session_state.db_path is None:
-        st.error("Please upload a SQLite DB first.")
-    else:
-        st.session_state.chat_history.append({"role": "user", "content": query, "timestamp": datetime.now(), "type": "user"})
+    if st.button("🚀 Send", use_container_width=True):
+        if not query.strip():
+            st.error("Please enter your query.")
+        elif st.session_state.db_path is None:
+            st.error("Please upload a SQLite DB first.")
+        else:
+            st.session_state.chat_history.append({"role": "user", "content": query, "timestamp": datetime.now(), "type": "user"})
 
-        # Generate SQL but hold execution until human approval
-        prompt = f"""You are an expert SQLite assistant. Generate only valid SQLite SQL based on user request and DB schema.\n\nUser Request:\n{query}\n\nSchema:\n{format_schema(schema_dict, fk_dict)}\n\nOnly SQL, no explanation:"""
-        with st.spinner("💬 Assistant is typing..."):
-            time.sleep(0.8)
-            sql = generate_sql(prompt)
+            # Generate SQL
+            schema_str = "\n".join([
+                f"**{t}**: {', '.join(cols)}" 
+                for t, cols in st.session_state.schema_dict.items()
+            ]) if st.session_state.schema_dict and "_error" not in st.session_state.schema_dict else "No tables available"
+            
+            prompt = f"""You are an expert SQLite assistant. Generate valid SQLite SQL based on user request and DB schema.
 
-        # Log query generation
-        audit_logger.log_query("PENDING", sql, "Generated by AI, awaiting user approval")
+User Request:
+{query}
 
-        # Save the generated SQL for human review
-        st.session_state.pending_sql = sql
-        st.session_state.improve_rounds = 0
-        st.session_state.chat_history.append({"role": "assistant", "content": sql, "timestamp": datetime.now(), "type": "assistant"})
+Schema:
+{schema_str}
 
-        st.session_state.last_query_df = None
-        st.session_state.last_sql_query = sql
+Only SQL, no explanation:"""
+            
+            with st.spinner("💬 Generating SQL..."):
+                time.sleep(0.5)
+                sql = generate_sql(prompt)
 
-        # Present human-in-loop controls
-        with st.expander("Review generated SQL (approve or improve)"):
-            st.markdown(f"```sql\n{st.session_state.pending_sql}\n```")
-            cols = st.columns([1,1,1])
-            approve = cols[0].button("✅ Approve", key=f"approve_{len(st.session_state.chat_history)}")
-            improve = cols[1].button("🛠 Improve", key=f"improve_{len(st.session_state.chat_history)}")
-            edit = cols[2].button("✏️ Edit & Execute", key=f"edit_{len(st.session_state.chat_history)}")
+            audit_logger.log_query("PENDING", sql, "Generated by AI, awaiting user approval")
 
-            if improve:
-                # Ask the model to refine the SQL using the original user intent and schema
+            st.session_state.pending_sql = sql
+            st.session_state.improve_rounds = 0
+            st.session_state.chat_history.append({"role": "assistant", "content": sql, "timestamp": datetime.now(), "type": "assistant"})
+
+            st.session_state.last_query_df = None
+            st.session_state.last_sql_query = sql
+
+            # Human-in-loop controls
+            st.session_state.approval_mode = True
+            st.markdown("### 📝 Review Generated SQL")
+            st.code(st.session_state.pending_sql, language="sql")
+            
+            cols_action = st.columns(3, gap="medium")
+            
+            if cols_action[0].button("✅ Execute", use_container_width=True, key=f"exec_{datetime.now().timestamp()}"):
+                st.session_state.action_taken = "execute"
+                st.rerun()
+            
+            if cols_action[1].button("🔄 Improve", use_container_width=True, key=f"impr_{datetime.now().timestamp()}"):
+                st.session_state.action_taken = "improve"
+                st.rerun()
+            
+            if cols_action[2].button("✏️ Edit", use_container_width=True, key=f"edit_{datetime.now().timestamp()}"):
+                st.session_state.action_taken = "edit"
+                st.rerun()
+            
+            # Handle actions after button click
+            if st.session_state.action_taken == "improve":
                 if st.session_state.improve_rounds >= 3:
-                    st.warning("Maximum improve attempts reached.")
+                    st.error("❌ Max improve attempts (3) reached.")
                     audit_logger.log_query("REJECTED", sql, "Max improve attempts exceeded")
+                    st.session_state.action_taken = None
                 else:
-                    improve_prompt = f"""Improve or fix the following SQLite query to better match the user request.\n\nUser Request:\n{query}\n\nCurrent SQL:\n{st.session_state.pending_sql}\n\nSchema:\n{format_schema(schema_dict, fk_dict)}\n\nReturn only the improved SQL, no explanation:"""
-                    with st.spinner("🔁 Improving SQL..."):
+                    st.info(f"🔁 Improving query (attempt {st.session_state.improve_rounds + 1}/3)...")
+                    improve_prompt = f"""Improve the SQLite query to better match the user's request:
+{query}
+
+Current SQL:
+{st.session_state.pending_sql}
+
+Return ONLY the improved SQL query, nothing else:"""
+                    with st.spinner("✨ AI is improving your query..."):
                         new_sql = generate_sql(improve_prompt)
+                    
                     st.session_state.pending_sql = new_sql
                     st.session_state.improve_rounds += 1
-                    st.session_state.chat_history.append({"role": "assistant", "content": new_sql, "timestamp": datetime.now(), "type": "assistant"})
-                    audit_logger.log_query("PENDING", new_sql, f"Improved query (round {st.session_state.improve_rounds})")
+                    st.session_state.chat_history.append({"role": "assistant", "content": f"Improved SQL (v{st.session_state.improve_rounds}):\n{new_sql}", "timestamp": datetime.now(), "type": "assistant"})
+                    audit_logger.log_query("PENDING", new_sql, f"Improved (round {st.session_state.improve_rounds})")
+                    st.session_state.action_taken = None
                     st.rerun()
-
-            if edit:
-                edited_sql = st.text_area("Edit SQL before execution:", value=st.session_state.pending_sql, height=120, key="edited_sql_area")
-                if st.button("Execute Edited SQL", key="exec_edited"):
-                    st.session_state.pending_sql = edited_sql
-                    approve = True
-
-            if approve:
-                sql_to_run = st.session_state.pending_sql
+            
+            elif st.session_state.action_taken == "edit":
+                st.markdown("### ✏️ Edit SQL")
+                edited_sql = st.text_area("Modify the SQL query:", value=st.session_state.pending_sql, height=120, key="edited_sql_area")
+                st.session_state.pending_sql = edited_sql
                 
-                # Log approval
+                if st.button("✅ Execute Edited SQL", use_container_width=True, key="exec_edited_now"):
+                    st.session_state.action_taken = "execute"
+                    st.rerun()
+            
+            elif st.session_state.action_taken == "execute":
+                sql_to_run = st.session_state.pending_sql
                 audit_logger.log_approval(sql_to_run, approved=True)
                 
-                st.session_state.chat_history.append({"role": "assistant", "content": "✅ Approved by user — executing SQL...", "timestamp": datetime.now(), "type": "assistant"})
+                with st.spinner("⏳ Executing query..."):
+                    try:
+                        df = pd.read_sql_query(sql_to_run, st.session_state.conn)
+                        st.session_state.last_query_df = df
+                        res = f"✅ Success! Returned {len(df)} rows."
+                        st.success(res)
+                        audit_logger.log_query("EXECUTED", sql_to_run, f"Success: {len(df)} rows")
+                    except Exception as e:
+                        res = f"❌ Query Error: {str(e)}"
+                        st.error(res)
+                        audit_logger.log_query("ERROR", sql_to_run, str(e))
                 
-                try:
-                    # Create safe executor and validate/execute query
-                    executor = SafeQueryExecutor(st.session_state.conn)
-                    success, message, results = executor.validate_and_execute(
-                        sql_to_run,
-                        audit_log_func=audit_logger.log_query
-                    )
-                    
-                    if success and results:
-                        # Convert results to DataFrame
-                        if results:
-                            columns = list(results[0].keys()) if isinstance(results[0], dict) else [f"col_{i}" for i in range(len(results[0]))]
-                            st.session_state.last_query_df = pd.DataFrame(results)
-                        res = message
-                    else:
-                        res = message if message else "Query could not be executed"
-                        
-                except Exception as e:
-                    res = f"❌ Error: {str(e)}"
-                    audit_logger.log_query("ERROR", sql_to_run, str(e))
-
                 st.session_state.chat_history.append({"role": "assistant", "content": res, "timestamp": datetime.now(), "type": "result"})
+                st.session_state.action_taken = None
+                st.rerun()
 
-# Render chat history
-render_chat()
+    # Render chat
+    if not st.session_state.approval_mode:
+        st.markdown("---")
+        render_chat()
 
-# Render last query dataframe below chat bubbles
-if st.session_state.last_query_df is not None:
-    st.table(st.session_state.last_query_df)
+    # Show results (only if execution happened)
+    if st.session_state.last_query_df is not None and len(st.session_state.last_query_df) > 0:
+        st.subheader("📊 Results")
+        st.dataframe(st.session_state.last_query_df, use_container_width=True)
+        
+        # Explain button
+        if st.session_state.last_sql_query:
+            if st.button("💡 Explain Last SQL"):
+                explanation = explain_sql(st.session_state.last_sql_query)
+                st.session_state.chat_history.append({"role": "assistant", "content": explanation, "timestamp": datetime.now(), "type": "assistant"})
+                st.rerun()
 
-# Explain last SQL button
-if st.session_state.last_sql_query:
-    if st.button("💡 Explain Last SQL"):
-        explanation = explain_sql(st.session_state.last_sql_query)
-        st.session_state.chat_history.append({"role": "assistant", "content": explanation, "timestamp": datetime.now(), "type": "assistant"})
+# Right sidebar: Chat History
+with col_history:
+    st.markdown("### 💬 Chat History")
+    st.markdown(f"*({len(st.session_state.chat_history)}/10)*")
+    
+    if len(st.session_state.chat_history) == 0:
+        st.info("No conversations yet.\nAsk a question to get started!")
+    else:
+        # Show last 10 conversations
+        for i, entry in enumerate(reversed(st.session_state.chat_history[-10:])):
+            if entry["type"] == "user":
+                content_preview = entry["content"][:40] + "..." if len(entry["content"]) > 40 else entry["content"]
+                st.markdown(f"""
+                <div class="history-item">
+                📝 {content_preview}
+                </div>
+                """, unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    # Clear history button
+    if st.button("🗑️ Clear History", use_container_width=True):
+        st.session_state.chat_history = []
+        st.session_state.last_query_df = None
         st.rerun()
