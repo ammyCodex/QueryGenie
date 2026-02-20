@@ -133,6 +133,8 @@ if "approval_mode" not in st.session_state:
     st.session_state.approval_mode = False
 if "action_taken" not in st.session_state:
     st.session_state.action_taken = None
+if "needs_execute" not in st.session_state:
+    st.session_state.needs_execute = False
 
 # Sidebar for DB upload
 with st.sidebar:
@@ -448,57 +450,11 @@ Only SQL, no explanation:"""
             
             cols_action = st.columns(2, gap="medium")
 
-            execute_clicked = cols_action[0].button("✅ Execute", use_container_width=True, key=f"exec_{datetime.now().timestamp()}")
-            improve_clicked = cols_action[1].button("🔄 Improve", use_container_width=True, key=f"impr_{datetime.now().timestamp()}")
-            
-            # Execute immediately if button clicked
-            if execute_clicked:
+            if cols_action[0].button("✅ Execute", use_container_width=True, key=f"exec_{datetime.now().timestamp()}"):
                 print(f"\n[EXECUTE BUTTON CLICKED]")
-                sql_to_run = st.session_state.pending_sql
-                if sql_to_run == "NO_VALID_SQL":
-                    print(f"[ERROR] Invalid SQL, cannot execute")
-                    st.error("Could not generate a valid SQL query from the provided schema and request.")
-                    audit_logger.log_query("REJECTED", sql_to_run, "Generator returned NO_VALID_SQL")
-                else:
-                    print(f"[EXECUTING SQL] {sql_to_run}")
-                    audit_logger.log_approval(sql_to_run, approved=True)
-                    with st.spinner("⏳ Executing query..."):
-                        try:
-                            try:
-                                limited_sql = f"SELECT * FROM ({sql_to_run}) LIMIT 21"
-                                print(f"[SQL WITH LIMIT] {limited_sql}")
-                                df = pd.read_sql_query(limited_sql, st.session_state.conn)
-                            except Exception as e:
-                                print(f"[FALLBACK] Limit query failed: {e}. Running original query.")
-                                df = pd.read_sql_query(sql_to_run, st.session_state.conn)
-
-                            truncated = False
-                            if len(df) > 20:
-                                truncated = True
-                                display_df = df.head(20)
-                            else:
-                                display_df = df
-
-                            st.session_state.last_query_df = display_df
-                            st.session_state.last_query_truncated = truncated
-                            row_count_msg = f"more than 20" if truncated else str(len(df))
-                            res = f"✅ Success! Returned {row_count_msg} rows."
-                            print(f"[SUCCESS] Query executed. Rows returned: {len(df)}. Displaying: {len(display_df)}")
-                            st.success(res)
-                            audit_logger.log_query("EXECUTED", sql_to_run, f"Success: {row_count_msg} rows")
-                            st.session_state.chat_history.append({"role": "assistant", "content": res, "timestamp": datetime.now(), "type": "result"})
-                            st.session_state.approval_mode = False
-                        except Exception as e:
-                            res = f"❌ Query Error: {str(e)}"
-                            print(f"[QUERY ERROR] {e}")
-                            st.error(res)
-                            audit_logger.log_query("ERROR", sql_to_run, str(e))
-                            st.session_state.chat_history.append({"role": "assistant", "content": res, "timestamp": datetime.now(), "type": "result"})
-                    # After execute, always rerun so table displays
-                    st.rerun()
+                st.session_state.needs_execute = True
             
-            # Handle improve if button clicked
-            elif improve_clicked:
+            if cols_action[1].button("🔄 Improve", use_container_width=True, key=f"impr_{datetime.now().timestamp()}"):
                 print(f"\n[IMPROVE BUTTON CLICKED]")
                 if st.session_state.improve_rounds >= 3:
                     print(f"[ERROR] Max improve attempts (3) reached")
@@ -545,6 +501,54 @@ Return ONLY the improved SQL query, nothing else:"""
                     st.session_state.chat_history.append({"role": "assistant", "content": f"Improved SQL (v{st.session_state.improve_rounds}):\n{new_sql}", "timestamp": datetime.now(), "type": "assistant"})
                     audit_logger.log_query("PENDING", new_sql, f"Improved (round {st.session_state.improve_rounds})")
                     st.rerun()
+            
+            # Execute if needs_execute flag is set (outside button block for cleaner flow)
+            if st.session_state.get("needs_execute"):
+                print(f"\n[EXECUTE ACTION] Processing execution")
+                st.session_state.needs_execute = False
+                sql_to_run = st.session_state.pending_sql
+                if sql_to_run == "NO_VALID_SQL":
+                    print(f"[ERROR] Invalid SQL, cannot execute")
+                    st.error("Could not generate a valid SQL query from the provided schema and request.")
+                    audit_logger.log_query("REJECTED", sql_to_run, "Generator returned NO_VALID_SQL")
+                else:
+                    print(f"[EXECUTING SQL] {sql_to_run}")
+                    audit_logger.log_approval(sql_to_run, approved=True)
+                    with st.spinner("⏳ Executing query..."):
+                        try:
+                            try:
+                                limited_sql = f"SELECT * FROM ({sql_to_run}) LIMIT 21"
+                                print(f"[SQL WITH LIMIT] {limited_sql}")
+                                df = pd.read_sql_query(limited_sql, st.session_state.conn)
+                            except Exception as e:
+                                print(f"[FALLBACK] Limit query failed: {e}. Running original query.")
+                                df = pd.read_sql_query(sql_to_run, st.session_state.conn)
+
+                            truncated = False
+                            if len(df) > 20:
+                                truncated = True
+                                display_df = df.head(20)
+                            else:
+                                display_df = df
+
+                            print(f"[SET SESSION] Storing DataFrame: {len(display_df)} rows, truncated={truncated}")
+                            st.session_state.last_query_df = display_df
+                            st.session_state.last_query_truncated = truncated
+                            row_count_msg = f"more than 20" if truncated else str(len(df))
+                            res = f"✅ Success! Returned {row_count_msg} rows."
+                            print(f"[SUCCESS] Query executed. Rows returned: {len(df)}. Displaying: {len(display_df)}")
+                            st.success(res)
+                            audit_logger.log_query("EXECUTED", sql_to_run, f"Success: {row_count_msg} rows")
+                            st.session_state.chat_history.append({"role": "assistant", "content": res, "timestamp": datetime.now(), "type": "result"})
+                            st.session_state.approval_mode = False
+                        except Exception as e:
+                            res = f"❌ Query Error: {str(e)}"
+                            print(f"[QUERY ERROR] {e}")
+                            st.error(res)
+                            audit_logger.log_query("ERROR", sql_to_run, str(e))
+                            st.session_state.chat_history.append({"role": "assistant", "content": res, "timestamp": datetime.now(), "type": "result"})
+                    print(f"[EXECUTE COMPLETE] approval_mode set to False, DataFrame stored")
+                    st.rerun()
 
 
     # Render chat
@@ -553,7 +557,9 @@ Return ONLY the improved SQL query, nothing else:"""
         render_chat()
     
     # Display table results (always show when DataFrame exists)
+    print(f"[TABLE CHECK] approval_mode={st.session_state.approval_mode}, last_query_df={'None' if st.session_state.last_query_df is None else 'Present'}")
     if st.session_state.last_query_df is not None:
+        print(f"[TABLE DISPLAY] Showing DataFrame with {len(st.session_state.last_query_df)} rows")
         st.markdown("---")
         st.subheader("📊 Query Results")
         if isinstance(st.session_state.last_query_df, pd.DataFrame) and len(st.session_state.last_query_df) > 0:
@@ -563,6 +569,8 @@ Return ONLY the improved SQL query, nothing else:"""
                 st.warning("⚠️ Table is too big to get displayed here (showing first 20 rows)")
         else:
             st.info("No rows returned by the query.")
+    else:
+        print(f"[TABLE SKIP] last_query_df is None")
         
         # Explain button
         if st.session_state.last_sql_query:
