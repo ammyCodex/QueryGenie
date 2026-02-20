@@ -264,20 +264,26 @@ with st.sidebar:
             print(f"  - {table}: {len(st.session_state.schema_dict[table])} columns")
         
         if "_error" not in st.session_state.schema_dict:
+            SIDEBAR_MAX_TABLES = 5  # Only show first N tables in sidebar (full schema still used for LLM)
+            schema_keys = list(st.session_state.schema_dict.keys())
+            schema_for_display = {t: st.session_state.schema_dict[t] for t in schema_keys[:SIDEBAR_MAX_TABLES]}
+
             def format_schema(schema, fks):
                 return "\n".join([
-                    f"**{t}**: {', '.join(cols)}" + 
-                    (f"\nForeign Keys: {', '.join([f'{col} → {ref}' for col, ref in fks[t]])}" if fks[t] else "") 
+                    f"**{t}**: {', '.join(cols)}" +
+                    (f"\nForeign Keys: {', '.join([f'{col} → {ref}' for col, ref in fks[t]])}" if fks.get(t) else "")
                     for t, cols in schema.items()
                 ])
 
             st.header("📋 DB Schema")
-            st.markdown(format_schema(st.session_state.schema_dict, st.session_state.fk_dict), unsafe_allow_html=True)
-            
-            # DB Records Preview
+            st.markdown(format_schema(schema_for_display, st.session_state.fk_dict), unsafe_allow_html=True)
+            if len(schema_keys) > SIDEBAR_MAX_TABLES:
+                st.caption(f"Showing first {SIDEBAR_MAX_TABLES} of {len(schema_keys)} tables.")
+
+            # DB Records Preview (same limit)
             st.header("📊 Records Preview")
             with st.expander("View Sample Data (Max 10 records per table)"):
-                for table in list(st.session_state.schema_dict.keys())[:5]:
+                for table in schema_keys[:SIDEBAR_MAX_TABLES]:
                     try:
                         df = pd.read_sql_query(f"SELECT * FROM {table} LIMIT 10", st.session_state.conn)
                         if len(df) > 0:
@@ -287,9 +293,8 @@ with st.sidebar:
                             st.info(f"{table}: No records")
                     except Exception as e:
                         st.warning(f"{table}: Error loading - {str(e)[:50]}")
-                
-                if len(st.session_state.schema_dict) > 5:
-                    st.warning(f"⚠️ Only showing first 5 tables. Database has {len(st.session_state.schema_dict)} tables.")
+                if len(schema_keys) > SIDEBAR_MAX_TABLES:
+                    st.caption(f"Showing first {SIDEBAR_MAX_TABLES} of {len(schema_keys)} tables.")
         else:
             st.warning("🚨 DB is too big to be displayed here (>20 tables)")
     else:
@@ -300,14 +305,43 @@ def clean_sql_output(text):
     return re.sub(r"```(?:sql)?\s*(.*?)```", r"\1", text, flags=re.DOTALL | re.IGNORECASE).strip()
 
 
+def _clean_sql_artifacts(sql: str) -> str:
+    """Remove [object Object] and fix leftover commas so SQL is executable."""
+    if not sql or not sql.strip():
+        return sql
+    s = sql.strip()
+    # Remove all [object Object] (any casing) and optional surrounding commas/spaces
+    s = re.sub(r",?\s*\[object\s+object\]\s*,?", ",", s, flags=re.IGNORECASE)
+    # Collapse multiple commas to single comma
+    s = re.sub(r",\s*,+", ",", s)
+    # Remove leading comma after SELECT (e.g. "SELECT ," -> "SELECT ")
+    s = re.sub(r"\bSELECT\s+,", "SELECT ", s, flags=re.IGNORECASE)
+    # Remove comma before keywords that start clauses (e.g. ", FROM" or ",FROM" -> " FROM")
+    for kw in ["FROM", "LEFT", "RIGHT", "INNER", "JOIN", "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "ON", "AND", "OR"]:
+        s = re.sub(r",\s*" + kw + r"\b", " " + kw, s, flags=re.IGNORECASE)
+    # Clean ", ," and ",  " -> ", "
+    s = re.sub(r",\s*,", ", ", s)
+    s = re.sub(r",\s{2,}", ", ", s)
+    # Normalize whitespace
+    s = re.sub(r"\n\s*\n", "\n", s)
+    s = re.sub(r"  +", " ", s).strip()
+    return s
+
+
 def extract_sql_from_llm_response(text: str) -> str:
     """Extract a single SQL statement from LLM output that may contain explanation, markdown, or multiple queries."""
     if not text or not text.strip():
         return text
     raw = text.strip()
-    # Remove common artifacts
-    raw = re.sub(r"\[object Object\]|,object Object\]", "", raw, flags=re.IGNORECASE)
+    # Remove [object Object] and comma artifacts before parsing
+    raw = re.sub(r",?\s*\[object\s+object\]\s*,?", " ", raw, flags=re.IGNORECASE)
     raw = re.sub(r",\s*,\s*", ", ", raw)
+
+    def return_cleaned(statement: str) -> str:
+        out = _clean_sql_artifacts(statement)
+        if not out.endswith(";") and out:
+            out = out + ";"
+        return out
 
     # 1) Try ```sql ... ``` or ``` ... ``` blocks first
     for pattern in [r"```sql\s*(.*?)```", r"```\s*(.*?)```"]:
@@ -315,10 +349,9 @@ def extract_sql_from_llm_response(text: str) -> str:
         for m in matches:
             block = m.strip()
             if re.search(r"\b(select|with)\b", block, re.IGNORECASE):
-                # Take first statement only (up to first ;)
                 first_stmt = block.split(";")[0].strip()
                 if first_stmt and len(first_stmt) > 10:
-                    return first_stmt + ";" if not first_stmt.endswith(";") else first_stmt
+                    return return_cleaned(first_stmt)
 
     # 2) No code block: find line that starts with SELECT or WITH, then collect until ;
     lines = raw.split("\n")
@@ -333,7 +366,6 @@ def extract_sql_from_llm_response(text: str) -> str:
         for i in range(start, len(lines)):
             line = lines[i]
             s = line.strip().lower()
-            # Stop before adding obvious non-SQL (markdown or explanation)
             if s.startswith("###") or (s.startswith("**") and not s.startswith("**`")) or "explanation" in s or "both queries" in s:
                 break
             collected.append(line)
@@ -341,12 +373,10 @@ def extract_sql_from_llm_response(text: str) -> str:
                 break
         out = "\n".join(collected).strip()
         if out and re.search(r"\b(select|with)\b", out, re.IGNORECASE):
-            if not out.endswith(";"):
-                out = out + ";"
-            return out
+            return return_cleaned(out)
 
-    # 3) Fallback: use existing clean_sql_output (may return full text)
-    return clean_sql_output(text)
+    # 3) Fallback: use existing clean_sql_output then clean artifacts
+    return return_cleaned(clean_sql_output(text))
 
 
 SQL_KEYWORDS = {"select", "from", "where", "join", "on", "and", "or", "group", "by", "order", "limit", "distinct", "as", "count", "sum", "avg", "min", "max", "inner", "left", "right", "full", "outer", "having", "union", "all", "in", "not", "exists", "between", "like", "is", "null", "case", "when", "then", "else", "end", "offset"}
