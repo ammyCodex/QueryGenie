@@ -168,8 +168,12 @@ def clean_sql_output(text):
 
 def generate_sql(prompt):
     with st.spinner("🤖 Generating SQL..."):
-        resp = co.chat(model=COHERE_MODEL, message=prompt, temperature=0.3, max_tokens=150)
-    return clean_sql_output(resp.text)
+        try:
+            resp = co.chat(model=COHERE_MODEL, message=prompt, temperature=0.3, max_tokens=150)
+            return clean_sql_output(resp.text)
+        except Exception as e:
+            st.error(f"Error generating SQL: {str(e)}")
+            raise
 
 def explain_sql(sql):
     prompt = f"""Explain briefly what this SQLite query does in simple terms:\n\n{sql}\n\nExplanation:"""

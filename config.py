@@ -14,7 +14,7 @@ load_dotenv(env_path)
 
 # Cohere API
 COHERE_API_KEY = os.getenv("COHERE_API_KEY", "")
-COHERE_MODEL = os.getenv("COHERE_MODEL", "command-r-plus")
+COHERE_MODEL = os.getenv("COHERE_MODEL", "command-a-03-2025")
 
 # Database
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///querydb.sqlite")
